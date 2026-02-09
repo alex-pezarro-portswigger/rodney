@@ -255,6 +255,7 @@ func cmdStart(args []string) {
 	l := launcher.New().
 		Set("no-sandbox").
 		Set("disable-gpu").
+		Set("single-process"). // Required for screenshots in gVisor/container environments
 		Headless(true).
 		Leakless(false). // Keep Chrome alive after CLI exits
 		UserDataDir(dataDir)

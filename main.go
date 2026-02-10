@@ -906,9 +906,10 @@ func cmdStartVideo(args []string) {
 
 // VideoResult holds the result of stop-video.
 type VideoResult struct {
-	FrameCount   int
-	UniqueFrames int    // for GIF: frames after deduplication
-	OutputFile   string // empty if assembly failed
+	FrameCount     int
+	UniqueFrames   int    // for GIF: frames after deduplication
+	OutputFile     string // empty if assembly failed
+	FallbackFormat bool   // true if fell back to GIF because ffmpeg was unavailable
 }
 
 // stopVideo stops recording, optionally assembles video, clears state.
@@ -934,10 +935,18 @@ func stopVideo(outputFile string) (*VideoResult, error) {
 				result.UniqueFrames = gifResult.UniqueFrames
 			}
 		} else {
-			if assembled, err := assembleVideo(framesDir, outputFile); err == nil {
+			assembled, err := assembleVideo(framesDir, outputFile)
+			if err == nil {
 				result.OutputFile = assembled
+			} else {
+				// ffmpeg not available — fall back to GIF
+				gifFile := strings.TrimSuffix(outputFile, filepath.Ext(outputFile)) + ".gif"
+				if gifResult, gifErr := assembleGIF(framesDir, gifFile); gifErr == nil {
+					result.OutputFile = gifResult.OutputFile
+					result.UniqueFrames = gifResult.UniqueFrames
+					result.FallbackFormat = true
+				}
 			}
-			// Non-fatal if ffmpeg fails
 		}
 	}
 
@@ -966,6 +975,9 @@ func cmdStopVideo(args []string) {
 	}
 
 	if result.OutputFile != "" {
+		if result.FallbackFormat {
+			fmt.Fprintf(os.Stderr, "ffmpeg not found, saving as GIF instead\n")
+		}
 		if result.UniqueFrames > 0 && result.UniqueFrames < result.FrameCount {
 			fmt.Printf("Saved %s (%d frames, %d unique)\n", result.OutputFile, result.FrameCount, result.UniqueFrames)
 		} else {

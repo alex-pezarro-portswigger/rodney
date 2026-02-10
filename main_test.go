@@ -909,6 +909,47 @@ func TestAssembleGIF_DecodableWithStdlib(t *testing.T) {
 	}
 }
 
+func TestStopVideo_MP4FallsBackToGIFWithoutFfmpeg(t *testing.T) {
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+
+	page := navigateTo(t, "/animated")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(1 * time.Second)
+	stop()
+
+	s := &State{DebugURL: "ws://fake", ChromePID: 99999, VideoRecording: true, VideoDir: framesDir}
+	saveState(s)
+
+	// Request .mp4 but with a bogus PATH so ffmpeg won't be found
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", "/nonexistent")
+	defer os.Setenv("PATH", origPath)
+
+	outputFile := filepath.Join(dir, "result.mp4")
+	result, err := stopVideo(outputFile)
+	if err != nil {
+		t.Fatalf("stopVideo failed: %v", err)
+	}
+
+	// Should have fallen back to GIF
+	if result.OutputFile == "" {
+		t.Fatal("expected OutputFile to be set (GIF fallback)")
+	}
+	if !strings.HasSuffix(result.OutputFile, ".gif") {
+		t.Errorf("expected .gif fallback, got %q", result.OutputFile)
+	}
+
+	// Verify it's actually a valid GIF
+	header := make([]byte, 6)
+	f, _ := os.Open(result.OutputFile)
+	f.Read(header)
+	f.Close()
+	if string(header[:3]) != "GIF" {
+		t.Errorf("fallback file is not a GIF, header: %q", string(header))
+	}
+}
+
 func TestStopVideo_DetectsGIFExtension(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")

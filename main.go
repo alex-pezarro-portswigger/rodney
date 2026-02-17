@@ -267,6 +267,8 @@ func main() {
 		cmdCount(args)
 	case "visible":
 		cmdVisible(args)
+	case "assert":
+		cmdAssert(args)
 	case "ax-tree":
 		cmdAXTree(args)
 	case "ax-find":
@@ -1384,6 +1386,105 @@ func cmdVisible(args []string) {
 	} else {
 		fmt.Println("false")
 		os.Exit(1)
+	}
+}
+
+// parseAssertArgs separates flags (--message/-m) from positional args.
+// Returns (expression, expected, message). expected is nil for truthy mode.
+func parseAssertArgs(args []string) (expr string, expected *string, message string) {
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--message", "-m":
+			i++
+			if i < len(args) {
+				message = args[i]
+			}
+		default:
+			positional = append(positional, args[i])
+		}
+	}
+	if len(positional) >= 1 {
+		expr = positional[0]
+	}
+	if len(positional) >= 2 {
+		expected = &positional[1]
+	}
+	return
+}
+
+// formatAssertFail builds the failure output line.
+// For truthy failures expected is nil; for equality failures it points to the expected string.
+func formatAssertFail(actual string, expected *string, message string) string {
+	if expected != nil {
+		// Equality mode
+		detail := fmt.Sprintf("got %q, expected %q", actual, *expected)
+		if message != "" {
+			return fmt.Sprintf("fail: %s (%s)", message, detail)
+		}
+		return fmt.Sprintf("fail: %s", detail)
+	}
+	// Truthy mode
+	if message != "" {
+		return fmt.Sprintf("fail: %s (got %s)", message, actual)
+	}
+	return fmt.Sprintf("fail: got %s", actual)
+}
+
+func cmdAssert(args []string) {
+	if len(args) < 1 {
+		fatal("usage: rodney assert <js-expression> [expected] [--message msg]")
+	}
+
+	expr, expected, message := parseAssertArgs(args)
+	if expr == "" {
+		fatal("usage: rodney assert <js-expression> [expected] [--message msg]")
+	}
+
+	_, _, page := withPage()
+
+	js := fmt.Sprintf(`() => { return (%s); }`, expr)
+	result, err := page.Eval(js)
+	if err != nil {
+		fatal("JS error: %v", err)
+	}
+
+	// Format the result value as a string, matching the js command's output
+	v := result.Value
+	raw := v.JSON("", "")
+	var actual string
+	switch {
+	case raw == "null" || raw == "undefined":
+		actual = raw
+	case raw == "true" || raw == "false":
+		actual = raw
+	case len(raw) > 0 && raw[0] == '"':
+		actual = v.Str()
+	case len(raw) > 0 && (raw[0] == '{' || raw[0] == '['):
+		actual = v.JSON("", "  ")
+	default:
+		actual = raw
+	}
+
+	if expected != nil {
+		// Equality mode: compare string representation to expected
+		if actual == *expected {
+			fmt.Println("pass")
+			os.Exit(0)
+		} else {
+			fmt.Println(formatAssertFail(actual, expected, message))
+			os.Exit(1)
+		}
+	} else {
+		// Truthy mode: check if the JS value is truthy
+		switch raw {
+		case "false", "0", "null", "undefined", `""`:
+			fmt.Println(formatAssertFail(actual, nil, message))
+			os.Exit(1)
+		default:
+			fmt.Println("pass")
+			os.Exit(0)
+		}
 	}
 }
 

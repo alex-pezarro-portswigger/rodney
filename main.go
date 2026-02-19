@@ -736,18 +736,11 @@ func cmdJS(args []string) {
 		fatal("usage: rodney js <expression>")
 	}
 	expr := strings.Join(args, " ")
-	s, _, page := withPage()
-
-	// Capture console.* events: always prints to stderr; also writes to NDJSON if --logs enabled.
-	// Chrome does not broadcast Runtime.consoleAPICalled cross-session for evaluate calls,
-	// so we must capture them here within the same CDP session.
-	cleanup := setupConsoleCapture(s, page)
+	_, _, page := withPage()
 
 	// Wrap bare expressions in a function
 	js := fmt.Sprintf(`() => { return (%s); }`, expr)
 	result, err := page.Eval(js)
-
-	cleanup()
 
 	if err != nil {
 		fatal("JS error: %v", err)
@@ -1466,12 +1459,10 @@ func cmdAssert(args []string) {
 		fatal("usage: rodney assert <js-expression> [expected] [--message msg]")
 	}
 
-	s, _, page := withPage()
+	_, _, page := withPage()
 
-	cleanup := setupConsoleCapture(s, page)
 	js := fmt.Sprintf(`() => { return (%s); }`, expr)
 	result, err := page.Eval(js)
-	cleanup()
 	if err != nil {
 		fatal("JS error: %v", err)
 	}
@@ -2158,22 +2149,6 @@ func formatAXNodeDetailJSON(node *proto.AccessibilityAXNode) string {
 }
 
 // --- Console logger infrastructure ---
-
-// setupConsoleCapture registers a Runtime.consoleAPICalled listener on the page
-// and prints events to stderr. File writing is handled exclusively by the _logger
-// subprocess to avoid double-writing (Chrome broadcasts events to all CDP sessions).
-func setupConsoleCapture(s *State, page *rod.Page) func() {
-	wait := page.EachEvent(func(e *proto.RuntimeConsoleAPICalled) bool {
-		entry := makeConsoleEntry(e)
-		fmt.Fprintf(os.Stderr, "[%s] %s\n", entry.level, entry.text)
-		return false
-	})
-	(proto.RuntimeEnable{}).Call(page)
-	go wait()
-	return func() {
-		time.Sleep(50 * time.Millisecond) // let EachEvent goroutine flush queued events
-	}
-}
 
 // startBrowserLogger spawns a single `rodney _logger` subprocess that stays connected
 // to CDP and writes Runtime.consoleAPICalled events for all pages to NDJSON files.

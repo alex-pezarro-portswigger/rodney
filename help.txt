@@ -35,7 +35,8 @@ Interaction:
   rodney cookie set <name> <value> --domain <domain> [--path <path>] [--secure] [--http-only] [--same-site <mode>]
                                  Set a browser cookie for a domain
   rodney cookie list              List cookies for the current page URL
-  rodney cookie get <name>        Print a cookie value for the current page URL
+  rodney cookie get <name> [--domain <domain>]
+                                  Print a cookie value for the current page URL
   rodney cookie delete <name> --domain <domain> [--path <path>]
                                  Delete a browser cookie by domain/path
 

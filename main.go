@@ -80,12 +80,12 @@ func resolveStateDir(mode scopeMode, workingDir string) string {
 
 // State persisted between CLI invocations
 type State struct {
-	DebugURL   string `json:"debug_url"`
-	ChromePID  int    `json:"chrome_pid"`
-	ActivePage int    `json:"active_page"` // index into pages list
-	DataDir    string `json:"data_dir"`
-	ProxyPID   int    `json:"proxy_pid,omitempty"`  // PID of auth proxy helper
-	ProxyPort  int    `json:"proxy_port,omitempty"` // local port of auth proxy
+	DebugURL    string `json:"debug_url"`
+	ChromePID   int    `json:"chrome_pid"`
+	ActivePage  int    `json:"active_page"`  // index into pages list
+	DataDir     string `json:"data_dir"`
+	ProxyPID    int    `json:"proxy_pid,omitempty"`  // PID of auth proxy helper
+	ProxyPort   int    `json:"proxy_port,omitempty"` // local port of auth proxy
 }
 
 func stateDir() string {
@@ -310,6 +310,7 @@ func main() {
 var defaultTimeout = 30 * time.Second
 
 const cookieSetUsage = "usage: rodney cookie set <name> <value> --domain <domain> [--path <path>] [--secure] [--http-only] [--same-site <strict|lax|none>]"
+const cookieGetUsage = "usage: rodney cookie get <name> [--domain <domain>]"
 const cookieDeleteUsage = "usage: rodney cookie delete <name> --domain <domain> [--path <path>]"
 
 func init() {
@@ -384,7 +385,7 @@ func cmdStart(args []string) {
 		Set("no-sandbox").
 		Set("disable-gpu").
 		Set("single-process"). // Required for screenshots in gVisor/container environments
-		Leakless(false).       // Keep Chrome alive after CLI exits
+		Leakless(false).        // Keep Chrome alive after CLI exits
 		UserDataDir(dataDir).
 		Headless(headless)
 
@@ -1138,17 +1139,19 @@ func cmdCookieList(args []string) {
 }
 
 func cmdCookieGet(args []string) {
-	if len(args) != 1 {
-		fatal("usage: rodney cookie get <name>")
+	name, domain, err := parseCookieGetArgs(args)
+	if err != nil {
+		fatal("%s", err)
 	}
 
 	_, _, page := withPage()
-	cookie, err := getCookie(page, args[0])
+	cookies, err := listCookies(page)
 	if err != nil {
 		fatal("failed to get cookie: %v", err)
 	}
+	cookie := findCookie(cookies, name, domain)
 	if cookie == nil {
-		fmt.Fprintf(os.Stderr, "cookie not found: %s\n", args[0])
+		fmt.Fprintf(os.Stderr, "cookie not found: %s\n", name)
 		os.Exit(1)
 	}
 	fmt.Println(cookie.Value)
@@ -1161,15 +1164,6 @@ func cmdCookieDelete(args []string) {
 	}
 
 	_, _, page := withPage()
-	cookie, err := getCookie(page, opts.Name)
-	if err != nil {
-		fatal("failed to check cookie: %v", err)
-	}
-	if cookie == nil || cookie.Domain != opts.Domain || cookie.Path != opts.Path {
-		fmt.Fprintf(os.Stderr, "cookie not found: %s\n", opts.Name)
-		os.Exit(1)
-	}
-
 	if err := deleteCookie(page, opts); err != nil {
 		fatal("failed to delete cookie: %v", err)
 	}
@@ -1256,6 +1250,38 @@ func parseCookieSameSite(value string) (proto.NetworkCookieSameSite, error) {
 	}
 }
 
+func parseCookieGetArgs(args []string) (string, string, error) {
+	var domain string
+	positionals := make([]string, 0, 1)
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch {
+		case arg == "--domain":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("missing value for --domain\n%s", cookieGetUsage)
+			}
+			i++
+			domain = args[i]
+		case strings.HasPrefix(arg, "--domain="):
+			domain = strings.TrimPrefix(arg, "--domain=")
+		case strings.HasPrefix(arg, "-"):
+			return "", "", fmt.Errorf("unknown flag: %s\n%s", arg, cookieGetUsage)
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+
+	if len(positionals) < 1 {
+		return "", "", fmt.Errorf("missing cookie name\n%s", cookieGetUsage)
+	}
+	if len(positionals) > 1 {
+		return "", "", fmt.Errorf("too many arguments: %s\n%s", positionals[1], cookieGetUsage)
+	}
+	return positionals[0], domain, nil
+}
+
 func parseCookieDeleteArgs(args []string) (cookieDeleteOptions, error) {
 	opts := cookieDeleteOptions{Path: "/"}
 	positionals := make([]string, 0, 1)
@@ -1335,7 +1361,7 @@ func getCookie(page *rod.Page, name string) (*proto.NetworkCookie, error) {
 	if err != nil {
 		return nil, err
 	}
-	return findCookie(cookies, name), nil
+	return findCookie(cookies, name, ""), nil
 }
 
 func deleteCookie(page *rod.Page, opts cookieDeleteOptions) error {
@@ -1372,11 +1398,15 @@ func formatCookieList(cookies []*proto.NetworkCookie) string {
 	return sb.String()
 }
 
-func findCookie(cookies []*proto.NetworkCookie, name string) *proto.NetworkCookie {
+func findCookie(cookies []*proto.NetworkCookie, name, domain string) *proto.NetworkCookie {
 	for _, cookie := range cookies {
-		if cookie.Name == name {
-			return cookie
+		if cookie.Name != name {
+			continue
 		}
+		if domain != "" && cookie.Domain != domain {
+			continue
+		}
+		return cookie
 	}
 	return nil
 }
@@ -1926,7 +1956,7 @@ func queryAXNodes(page *rod.Page, name, role string) ([]*proto.AccessibilityAXNo
 	}
 
 	result, err := proto.AccessibilityQueryAXTree{
-		BackendNodeID:  doc.Root.BackendNodeID,
+		BackendNodeID: doc.Root.BackendNodeID,
 		AccessibleName: name,
 		Role:           role,
 	}.Call(page)

@@ -821,6 +821,74 @@ func TestParseCookieSetArgs_WithOptionalFlags(t *testing.T) {
 	}
 }
 
+func TestParseCookieSetArgs_SameSiteEqualsForm(t *testing.T) {
+	opts, err := parseCookieSetArgs([]string{"session", "abc123", "--domain", "example.com", "--same-site=strict"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.SameSite != proto.NetworkCookieSameSiteStrict {
+		t.Errorf("SameSite = %q, want %q", opts.SameSite, proto.NetworkCookieSameSiteStrict)
+	}
+}
+
+func TestParseCookieGetArgs_Minimal(t *testing.T) {
+	name, domain, err := parseCookieGetArgs([]string{"session"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "session" {
+		t.Errorf("name = %q, want %q", name, "session")
+	}
+	if domain != "" {
+		t.Errorf("domain = %q, want empty", domain)
+	}
+}
+
+func TestParseCookieGetArgs_WithDomain(t *testing.T) {
+	cases := []struct {
+		label string
+		args  []string
+	}{
+		{"space", []string{"session", "--domain", "example.com"}},
+		{"equals", []string{"session", "--domain=example.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			name, domain, err := parseCookieGetArgs(tc.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if name != "session" || domain != "example.com" {
+				t.Errorf("got (%q, %q), want (session, example.com)", name, domain)
+			}
+		})
+	}
+}
+
+func TestParseCookieGetArgs_RequiresName(t *testing.T) {
+	if _, _, err := parseCookieGetArgs([]string{"--domain", "example.com"}); err == nil {
+		t.Fatal("expected error when name is missing")
+	}
+}
+
+func TestFindCookie_FiltersByDomain(t *testing.T) {
+	cookies := []*proto.NetworkCookie{
+		{Name: "session", Value: "parent", Domain: "example.com"},
+		{Name: "session", Value: "child", Domain: "sub.example.com"},
+	}
+	got := findCookie(cookies, "session", "sub.example.com")
+	if got == nil || got.Value != "child" {
+		t.Fatalf("expected child cookie, got %+v", got)
+	}
+	got = findCookie(cookies, "session", "")
+	if got == nil || got.Value != "parent" {
+		t.Fatalf("expected first match without domain filter, got %+v", got)
+	}
+	if findCookie(cookies, "session", "other.com") != nil {
+		t.Fatal("expected nil when domain doesn't match")
+	}
+}
+
 func TestParseCookieSetArgs_RequiresDomain(t *testing.T) {
 	_, err := parseCookieSetArgs([]string{"session", "abc123"})
 	if err == nil {
@@ -1177,10 +1245,10 @@ func TestAssert_ValueFormatting_MatchesJSCommand(t *testing.T) {
 		expr     string
 		expected string
 	}{
-		{`document.title`, "Test Page"}, // string unquoted
-		{`1 + 2`, "3"},                  // number
-		{`true`, "true"},                // boolean
-		{`null`, "null"},                // null
+		{`document.title`, "Test Page"},   // string unquoted
+		{`1 + 2`, "3"},                    // number
+		{`true`, "true"},                  // boolean
+		{`null`, "null"},                  // null
 		{`document.querySelectorAll("button").length`, "2"}, // number from DOM
 	}
 

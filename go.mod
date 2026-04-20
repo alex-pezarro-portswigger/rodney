@@ -1,4 +1,4 @@
-module github.com/simonw/rodney
+module github.com/alex-pezarro-portswigger/rodney
 
 go 1.24.7
 

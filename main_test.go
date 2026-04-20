@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -771,6 +772,327 @@ func TestMimeToExt(t *testing.T) {
 			t.Errorf("mimeToExt(%q) = %q, want %q", tt.mime, got, tt.ext)
 		}
 	}
+}
+
+func TestParseCookieSetArgs_Minimal(t *testing.T) {
+	opts, err := parseCookieSetArgs([]string{"session", "abc123", "--domain", "example.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Name != "session" {
+		t.Errorf("Name = %q, want %q", opts.Name, "session")
+	}
+	if opts.Value != "abc123" {
+		t.Errorf("Value = %q, want %q", opts.Value, "abc123")
+	}
+	if opts.Domain != "example.com" {
+		t.Errorf("Domain = %q, want %q", opts.Domain, "example.com")
+	}
+	if opts.Path != "/" {
+		t.Errorf("Path = %q, want %q", opts.Path, "/")
+	}
+	if opts.Secure {
+		t.Error("expected Secure=false by default")
+	}
+	if opts.HTTPOnly {
+		t.Error("expected HTTPOnly=false by default")
+	}
+	if opts.SameSite != "" {
+		t.Errorf("SameSite = %q, want empty", opts.SameSite)
+	}
+}
+
+func TestParseCookieSetArgs_WithOptionalFlags(t *testing.T) {
+	opts, err := parseCookieSetArgs([]string{"session", "abc123", "--domain", "example.com", "--path", "/app", "--secure", "--http-only", "--same-site", "strict"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Path != "/app" {
+		t.Errorf("Path = %q, want %q", opts.Path, "/app")
+	}
+	if !opts.Secure {
+		t.Error("expected Secure=true when --secure is passed")
+	}
+	if !opts.HTTPOnly {
+		t.Error("expected HTTPOnly=true when --http-only is passed")
+	}
+	if opts.SameSite != proto.NetworkCookieSameSiteStrict {
+		t.Errorf("SameSite = %q, want %q", opts.SameSite, proto.NetworkCookieSameSiteStrict)
+	}
+}
+
+func TestParseCookieSetArgs_SameSiteEqualsForm(t *testing.T) {
+	opts, err := parseCookieSetArgs([]string{"session", "abc123", "--domain", "example.com", "--same-site=strict"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.SameSite != proto.NetworkCookieSameSiteStrict {
+		t.Errorf("SameSite = %q, want %q", opts.SameSite, proto.NetworkCookieSameSiteStrict)
+	}
+}
+
+func TestParseCookieGetArgs_Minimal(t *testing.T) {
+	name, domain, err := parseCookieGetArgs([]string{"session"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "session" {
+		t.Errorf("name = %q, want %q", name, "session")
+	}
+	if domain != "" {
+		t.Errorf("domain = %q, want empty", domain)
+	}
+}
+
+func TestParseCookieGetArgs_WithDomain(t *testing.T) {
+	cases := []struct {
+		label string
+		args  []string
+	}{
+		{"space", []string{"session", "--domain", "example.com"}},
+		{"equals", []string{"session", "--domain=example.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			name, domain, err := parseCookieGetArgs(tc.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if name != "session" || domain != "example.com" {
+				t.Errorf("got (%q, %q), want (session, example.com)", name, domain)
+			}
+		})
+	}
+}
+
+func TestParseCookieGetArgs_RequiresName(t *testing.T) {
+	if _, _, err := parseCookieGetArgs([]string{"--domain", "example.com"}); err == nil {
+		t.Fatal("expected error when name is missing")
+	}
+}
+
+func TestFindCookie_FiltersByDomain(t *testing.T) {
+	cookies := []*proto.NetworkCookie{
+		{Name: "session", Value: "parent", Domain: "example.com"},
+		{Name: "session", Value: "child", Domain: "sub.example.com"},
+	}
+	got := findCookie(cookies, "session", "sub.example.com")
+	if got == nil || got.Value != "child" {
+		t.Fatalf("expected child cookie, got %+v", got)
+	}
+	got = findCookie(cookies, "session", "")
+	if got == nil || got.Value != "parent" {
+		t.Fatalf("expected first match without domain filter, got %+v", got)
+	}
+	if findCookie(cookies, "session", "other.com") != nil {
+		t.Fatal("expected nil when domain doesn't match")
+	}
+}
+
+func TestParseCookieSetArgs_RequiresDomain(t *testing.T) {
+	_, err := parseCookieSetArgs([]string{"session", "abc123"})
+	if err == nil {
+		t.Fatal("expected error when --domain is missing")
+	}
+	if !strings.Contains(err.Error(), "--domain") {
+		t.Errorf("error should mention --domain, got %v", err)
+	}
+}
+
+func TestSetCookie_SetsCookieForDomain(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	serverURL, err := url.Parse(env.server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	opts := cookieSetOptions{
+		Name:   name,
+		Value:  "blue",
+		Domain: serverURL.Hostname(),
+		Path:   "/",
+	}
+
+	if err := setCookie(page, opts); err != nil {
+		t.Fatalf("setCookie failed: %v", err)
+	}
+
+	cookie := findCookieByName(page.MustCookies(env.server.URL), name)
+	if cookie == nil {
+		t.Fatalf("expected cookie %q to be present", name)
+	}
+	if cookie.Value != "blue" {
+		t.Errorf("Value = %q, want %q", cookie.Value, "blue")
+	}
+	if cookie.Domain != serverURL.Hostname() {
+		t.Errorf("Domain = %q, want %q", cookie.Domain, serverURL.Hostname())
+	}
+	if cookie.Path != "/" {
+		t.Errorf("Path = %q, want %q", cookie.Path, "/")
+	}
+}
+
+func TestSetCookie_AppliesOptionalAttributes(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	serverURL, err := url.Parse(env.server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	name := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	opts := cookieSetOptions{
+		Name:     name,
+		Value:    "value",
+		Domain:   serverURL.Hostname(),
+		Path:     "/",
+		HTTPOnly: true,
+		SameSite: proto.NetworkCookieSameSiteLax,
+	}
+
+	if err := setCookie(page, opts); err != nil {
+		t.Fatalf("setCookie failed: %v", err)
+	}
+
+	cookie := findCookieByName(page.MustCookies(env.server.URL), name)
+	if cookie == nil {
+		t.Fatalf("expected cookie %q to be present", name)
+	}
+	if !cookie.HTTPOnly {
+		t.Error("expected cookie to be HTTPOnly")
+	}
+	if cookie.SameSite != proto.NetworkCookieSameSiteLax {
+		t.Errorf("SameSite = %q, want %q", cookie.SameSite, proto.NetworkCookieSameSiteLax)
+	}
+}
+
+func TestParseCookieDeleteArgs_Minimal(t *testing.T) {
+	opts, err := parseCookieDeleteArgs([]string{"session", "--domain", "example.com"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Name != "session" {
+		t.Errorf("Name = %q, want %q", opts.Name, "session")
+	}
+	if opts.Domain != "example.com" {
+		t.Errorf("Domain = %q, want %q", opts.Domain, "example.com")
+	}
+	if opts.Path != "/" {
+		t.Errorf("Path = %q, want %q", opts.Path, "/")
+	}
+}
+
+func TestParseCookieDeleteArgs_RequiresDomain(t *testing.T) {
+	_, err := parseCookieDeleteArgs([]string{"session"})
+	if err == nil {
+		t.Fatal("expected error when --domain is missing")
+	}
+	if !strings.Contains(err.Error(), "--domain") {
+		t.Errorf("error should mention --domain, got %v", err)
+	}
+}
+
+func TestListCookies_ReturnsCurrentPageCookies(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	serverURL, err := url.Parse(env.server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	mustSetCookie(t, page, cookieSetOptions{Name: "alpha", Value: "1", Domain: serverURL.Hostname(), Path: "/"})
+	mustSetCookie(t, page, cookieSetOptions{Name: "beta", Value: "2", Domain: serverURL.Hostname(), Path: "/"})
+
+	cookies, err := listCookies(page)
+	if err != nil {
+		t.Fatalf("listCookies failed: %v", err)
+	}
+	if findCookieByName(cookies, "alpha") == nil {
+		t.Fatal("expected cookie alpha in list")
+	}
+	if findCookieByName(cookies, "beta") == nil {
+		t.Fatal("expected cookie beta in list")
+	}
+}
+
+func TestGetCookie_ReturnsMatchingCookie(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	serverURL, err := url.Parse(env.server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	mustSetCookie(t, page, cookieSetOptions{Name: "theme", Value: "dark", Domain: serverURL.Hostname(), Path: "/"})
+
+	cookie, err := getCookie(page, "theme")
+	if err != nil {
+		t.Fatalf("getCookie failed: %v", err)
+	}
+	if cookie == nil {
+		t.Fatal("expected cookie to be found")
+	}
+	if cookie.Value != "dark" {
+		t.Errorf("Value = %q, want %q", cookie.Value, "dark")
+	}
+}
+
+func TestGetCookie_ReturnsNilWhenMissing(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	cookie, err := getCookie(page, "missing")
+	if err != nil {
+		t.Fatalf("getCookie failed: %v", err)
+	}
+	if cookie != nil {
+		t.Fatalf("expected nil cookie, got %+v", cookie)
+	}
+}
+
+func TestDeleteCookie_RemovesCookie(t *testing.T) {
+	page := navigateTo(t, "/empty")
+	serverURL, err := url.Parse(env.server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	opts := cookieSetOptions{Name: "remove-me", Value: "gone", Domain: serverURL.Hostname(), Path: "/"}
+	mustSetCookie(t, page, opts)
+
+	if err := deleteCookie(page, cookieDeleteOptions{Name: opts.Name, Domain: opts.Domain, Path: opts.Path}); err != nil {
+		t.Fatalf("deleteCookie failed: %v", err)
+	}
+
+	cookie, err := getCookie(page, opts.Name)
+	if err != nil {
+		t.Fatalf("getCookie failed: %v", err)
+	}
+	if cookie != nil {
+		t.Fatalf("expected cookie to be deleted, got %+v", cookie)
+	}
+}
+
+func TestFormatCookieList_SortsByName(t *testing.T) {
+	formatted := formatCookieList([]*proto.NetworkCookie{
+		{Name: "beta", Value: "2"},
+		{Name: "alpha", Value: "1"},
+	})
+	if formatted != "alpha=1\nbeta=2\n" {
+		t.Fatalf("unexpected formatted output: %q", formatted)
+	}
+}
+
+func mustSetCookie(t *testing.T, page *rod.Page, opts cookieSetOptions) {
+	t.Helper()
+	if err := setCookie(page, opts); err != nil {
+		t.Fatalf("setCookie failed: %v", err)
+	}
+}
+
+func findCookieByName(cookies []*proto.NetworkCookie, name string) *proto.NetworkCookie {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	return nil
 }
 
 // =====================

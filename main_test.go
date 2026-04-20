@@ -913,6 +913,62 @@ func TestAssembleGIF_DecodableWithStdlib(t *testing.T) {
 	}
 }
 
+func TestAssembleGIF_CapsInterCommandGaps(t *testing.T) {
+	// Simulate two capture sessions separated by a large timestamp gap
+	// (as happens between rodney command invocations when an agent pauses
+	// to think). The resulting GIF should NOT include that gap as a long
+	// per-frame delay.
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+	os.MkdirAll(framesDir, 0755)
+
+	// Capture a single real frame to use as the source JPEG
+	page := navigateTo(t, "/")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(200 * time.Millisecond)
+	stop()
+
+	src, err := os.ReadFile(filepath.Join(framesDir, "frame_000000.jpeg"))
+	if err != nil {
+		t.Fatalf("could not read source frame: %v", err)
+	}
+
+	// Reset: write two different-enough frames with a 25-second gap.
+	// We synthesize "different enough" by reusing the same JPEG but giving
+	// the second frame a distinct index so dedup doesn't hide the issue —
+	// even when dedup merges them, the extension must be capped.
+	os.RemoveAll(framesDir)
+	os.MkdirAll(framesDir, 0755)
+	os.WriteFile(filepath.Join(framesDir, "frame_000000.jpeg"), src, 0644)
+	os.WriteFile(filepath.Join(framesDir, "frame_000001.jpeg"), src, 0644)
+	metaLines := `{"idx":0,"ts":1000.000000}` + "\n" +
+		`{"idx":1,"ts":1025.000000}` + "\n" // 25s gap
+	os.WriteFile(filepath.Join(framesDir, "meta.jsonl"), []byte(metaLines), 0644)
+
+	outputFile := filepath.Join(dir, "gap-test.gif")
+	if _, err := assembleGIF(framesDir, outputFile); err != nil {
+		t.Fatalf("assembleGIF failed: %v", err)
+	}
+
+	f, err := os.Open(outputFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	g, err := gif.DecodeAll(f)
+	if err != nil {
+		t.Fatalf("gif.DecodeAll failed: %v", err)
+	}
+
+	// No single frame should hold for more than 1 second (100 centiseconds).
+	// Before the fix, frame 0 would hold for 2500cs (25 seconds).
+	for i, d := range g.Delay {
+		if d > 100 {
+			t.Errorf("frame %d delay %dcs exceeds 1s cap; inter-command gap leaked into GIF", i, d)
+		}
+	}
+}
+
 func TestSleep_CapturesVideoFramesWhenRecording(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")

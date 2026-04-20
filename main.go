@@ -1056,6 +1056,10 @@ func assembleVariableFPS(ffmpeg, framesDir, outputFile string, metaData []byte) 
 	if err != nil {
 		return assembleConstantFPS(ffmpeg, framesDir, outputFile)
 	}
+	// Cap per-frame durations so idle time between rodney commands (e.g.
+	// an agent thinking between invocations) does not bloat the video.
+	// See the matching comment in assembleGIF for the rationale.
+	const maxPerFrameDuration = 0.1 // 100ms
 	for i, fm := range frames {
 		framePath := filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpeg", fm.Idx))
 		fmt.Fprintf(f, "file '%s'\n", framePath)
@@ -1063,6 +1067,9 @@ func assembleVariableFPS(ffmpeg, framesDir, outputFile string, metaData []byte) 
 			dur := frames[i+1].Ts - fm.Ts
 			if dur <= 0 {
 				dur = 0.033
+			}
+			if dur > maxPerFrameDuration {
+				dur = maxPerFrameDuration
 			}
 			fmt.Fprintf(f, "duration %.6f\n", dur)
 		} else {
@@ -1130,8 +1137,17 @@ func assembleGIF(framesDir, outputFile string) (*GIFResult, error) {
 		return nil, fmt.Errorf("no frames to assemble")
 	}
 
-	// Build timing lookup: index -> duration in centiseconds (1/100 sec)
-	frameDurations := make(map[int]int) // frame index -> delay in centiseconds
+	// Build timing lookup: index -> duration in centiseconds (1/100 sec).
+	//
+	// The screencast captures frames at ~30fps, so adjacent frames within a
+	// single rodney invocation are never more than ~50ms apart. Anything
+	// substantially larger represents thinking time between rodney commands
+	// (e.g. an agent pausing to reason) and must not be baked into the GIF.
+	// Callers who want a visible pause should use `rodney sleep` instead,
+	// which keeps the screencast active and produces many short-delay frames
+	// that dedup merges back into the intended pause length.
+	const maxPerFrameCentiseconds = 10 // 100ms
+	frameDurations := make(map[int]int)
 	for i := 0; i < len(metas)-1; i++ {
 		dur := metas[i+1].Ts - metas[i].Ts
 		if dur <= 0 {
@@ -1140,6 +1156,9 @@ func assembleGIF(framesDir, outputFile string) (*GIFResult, error) {
 		cs := int(dur*100 + 0.5) // convert to centiseconds, rounded
 		if cs < 2 {
 			cs = 2 // GIF minimum delay is 2cs (20ms) in most viewers
+		}
+		if cs > maxPerFrameCentiseconds {
+			cs = maxPerFrameCentiseconds
 		}
 		frameDurations[metas[i].Idx] = cs
 	}

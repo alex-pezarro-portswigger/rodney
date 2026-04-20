@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
 	"image/gif"
+	"image/jpeg"
 	"io"
 	"log"
 	"net/http"
@@ -1814,6 +1818,60 @@ func withTestStateDir(t *testing.T) string {
 	return dir
 }
 
+// synthJPEG returns a tiny JPEG whose only content is a solid rectangle of
+// the given hue. Floyd-Steinberg on a 16x16 image is ~100x faster than on a
+// full viewport frame, which is what makes the assembly-logic tests slow.
+func synthJPEG(t *testing.T, r, g, b uint8) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	c := color.RGBA{r, g, b, 0xFF}
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatalf("synthJPEG encode: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// writeSyntheticFrames populates framesDir with n JPEG frames and a matching
+// meta.jsonl. If distinct is true the frames differ (so dedup treats each as
+// unique); otherwise every frame is identical. Timestamps are 33ms apart to
+// match screencast cadence.
+//
+// Tests that exercise assembly/formatting logic should use this instead of
+// driving Chrome's live screencast — capture adds 1–2s of test time and
+// doesn't add coverage for the code under test.
+func writeSyntheticFrames(t *testing.T, framesDir string, n int, distinct bool) {
+	t.Helper()
+	if err := os.MkdirAll(framesDir, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", framesDir, err)
+	}
+	var metaFile *os.File
+	metaFile, err := os.Create(filepath.Join(framesDir, "meta.jsonl"))
+	if err != nil {
+		t.Fatalf("create meta: %v", err)
+	}
+	defer metaFile.Close()
+
+	base := synthJPEG(t, 0xFF, 0x00, 0x00)
+	for i := 0; i < n; i++ {
+		data := base
+		if distinct {
+			// Vary the hue so JPEG pixel bytes differ run-to-run.
+			data = synthJPEG(t, uint8(10+i*20), uint8(80+i*5), 0x00)
+		}
+		framePath := filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpeg", i))
+		if err := os.WriteFile(framePath, data, 0644); err != nil {
+			t.Fatalf("write frame %d: %v", i, err)
+		}
+		fmt.Fprintf(metaFile, `{"idx":%d,"ts":%.6f}`+"\n", i, 1000.0+float64(i)*0.033)
+	}
+}
+
 func TestStartVideo_SetsStateFlag(t *testing.T) {
 	dir := withTestStateDir(t)
 
@@ -2021,15 +2079,7 @@ func TestAssembleVideo_ProducesMP4(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	// Capture real frames from an animated page
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	n := stop()
-
-	if n < 2 {
-		t.Fatalf("need at least 2 frames for video, got %d", n)
-	}
+	writeSyntheticFrames(t, framesDir, 4, true)
 
 	outputFile := filepath.Join(dir, "test-output.mp4")
 	result, err := assembleVideo(framesDir, outputFile)
@@ -2096,11 +2146,7 @@ func TestStopVideo_ProducesMP4WhenFfmpegAvailable(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	// Capture real frames from animated page
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	stop()
+	writeSyntheticFrames(t, framesDir, 4, true)
 
 	// Set up state as if start-video had run
 	s := &State{DebugURL: "ws://fake", ChromePID: 99999, VideoRecording: true, VideoDir: framesDir}
@@ -2142,15 +2188,7 @@ func TestAssembleGIF_ProducesValidGIF(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	// Capture real frames from animated page
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	n := stop()
-
-	if n < 2 {
-		t.Fatalf("need at least 2 frames, got %d", n)
-	}
+	writeSyntheticFrames(t, framesDir, 8, true)
 
 	outputFile := filepath.Join(dir, "test-output.gif")
 	result, err := assembleGIF(framesDir, outputFile)
@@ -2188,30 +2226,8 @@ func TestAssembleGIF_ProducesValidGIF(t *testing.T) {
 func TestAssembleGIF_DeduplicatesIdenticalFrames(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
-	os.MkdirAll(framesDir, 0755)
 
-	// Write identical JPEG frames to simulate duplicate screencast output
-	// Use a real JPEG from a page capture for realistic data
-	page := navigateTo(t, "/")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(200 * time.Millisecond)
-	stop()
-
-	// Read whatever frame we got and duplicate it
-	firstFrame, err := os.ReadFile(filepath.Join(framesDir, "frame_000000.jpeg"))
-	if err != nil {
-		t.Fatalf("no frame captured: %v", err)
-	}
-
-	// Clear and write 10 identical frames + metadata
-	os.RemoveAll(framesDir)
-	os.MkdirAll(framesDir, 0755)
-	metaFile, _ := os.Create(filepath.Join(framesDir, "meta.jsonl"))
-	for i := 0; i < 10; i++ {
-		os.WriteFile(filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpeg", i)), firstFrame, 0644)
-		fmt.Fprintf(metaFile, `{"idx":%d,"ts":%.6f}`+"\n", i, float64(1000)+float64(i)*0.033)
-	}
-	metaFile.Close()
+	writeSyntheticFrames(t, framesDir, 10, false)
 
 	outputFile := filepath.Join(dir, "dedup-test.gif")
 	result, err := assembleGIF(framesDir, outputFile)
@@ -2234,10 +2250,7 @@ func TestAssembleGIF_DecodableWithStdlib(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	stop()
+	writeSyntheticFrames(t, framesDir, 8, true)
 
 	outputFile := filepath.Join(dir, "decode-test.gif")
 	_, err := assembleGIF(framesDir, outputFile)
@@ -2291,23 +2304,9 @@ func TestAssembleGIF_CapsInterCommandGaps(t *testing.T) {
 	framesDir := filepath.Join(dir, "video-frames")
 	os.MkdirAll(framesDir, 0755)
 
-	// Capture a single real frame to use as the source JPEG
-	page := navigateTo(t, "/")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(200 * time.Millisecond)
-	stop()
-
-	src, err := os.ReadFile(filepath.Join(framesDir, "frame_000000.jpeg"))
-	if err != nil {
-		t.Fatalf("could not read source frame: %v", err)
-	}
-
-	// Reset: write two different-enough frames with a 25-second gap.
-	// We synthesize "different enough" by reusing the same JPEG but giving
-	// the second frame a distinct index so dedup doesn't hide the issue —
-	// even when dedup merges them, the extension must be capped.
-	os.RemoveAll(framesDir)
-	os.MkdirAll(framesDir, 0755)
+	// Two frames with a 25-second timestamp gap between them (as happens
+	// when an agent pauses to think between rodney command invocations).
+	src := synthJPEG(t, 0xFF, 0x00, 0x00)
 	os.WriteFile(filepath.Join(framesDir, "frame_000000.jpeg"), src, 0644)
 	os.WriteFile(filepath.Join(framesDir, "frame_000001.jpeg"), src, 0644)
 	metaLines := `{"idx":0,"ts":1000.000000}` + "\n" +
@@ -2429,10 +2428,7 @@ func TestStopVideo_MP4FallsBackToGIFWithoutFfmpeg(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	stop()
+	writeSyntheticFrames(t, framesDir, 4, true)
 
 	s := &State{DebugURL: "ws://fake", ChromePID: 99999, VideoRecording: true, VideoDir: framesDir}
 	saveState(s)
@@ -2470,10 +2466,7 @@ func TestStopVideo_DetectsGIFExtension(t *testing.T) {
 	dir := withTestStateDir(t)
 	framesDir := filepath.Join(dir, "video-frames")
 
-	page := navigateTo(t, "/animated")
-	stop := startVideoCapture(page, framesDir)
-	time.Sleep(1 * time.Second)
-	stop()
+	writeSyntheticFrames(t, framesDir, 4, true)
 
 	s := &State{DebugURL: "ws://fake", ChromePID: 99999, VideoRecording: true, VideoDir: framesDir}
 	saveState(s)

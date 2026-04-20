@@ -33,6 +33,11 @@ Interaction:
   rodney hover <selector>         Hover over an element
   rodney focus <selector>         Focus an element
 
+When using "rodney input" to fill a field with a secret from a keychain or
+credential store (e.g. macOS "security", 1Password "op", "pass", "vault"),
+redirect output so the secret is not printed back:
+  rodney input '#password' "$(security find-generic-password -w ...)" > /dev/null 2>&1
+
 Waiting:
   rodney wait <selector>          Wait for element to appear
   rodney waitload                 Wait for page load
